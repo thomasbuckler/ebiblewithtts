@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
 // The site is static: copy site/ to dist/ and check that the code parses and
@@ -11,7 +11,7 @@ for (const file of ['site/assets/index-BCmaOVrC.js', 'site/assets/routes-D_68uCl
 }
 const tracks = Object.values(JSON.parse(readFileSync('site/bible-audio/verses.json', 'utf8')));
 if (tracks.length !== 31098) throw new Error('Incomplete audio catalog');
-const missing = tracks.filter(path => !existsSync(`site/${path}`));
+const missing = tracks.filter(path => !existsSync(`site/${path}`) || !statSync(`site/${path}`).size);
 if (missing.length) {
   console.warn(`${missing.length} of ${tracks.length} recordings are missing from site/audio/ (first: ${missing[0]}).`);
   console.warn('Add them with: python3 tools/import_audio.py /path/to/audio.zip');
