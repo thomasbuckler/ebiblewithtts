@@ -19,7 +19,7 @@ export function createVersePlayer({
   let revision = 0;
   let finished = false;
   let removeListeners = () => {};
-  audio.preload = 'auto';
+  audio.preload = 'none';
   audio.muted = muted;
 
   const snapshot = () => ({ key, active, muted: audio.muted, auto, phase, advanceAt });
