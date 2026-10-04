@@ -25,7 +25,7 @@ Put the `.m4a` files at the paths listed in `site/bible-audio/verses.json`, or
 let the import script do it from the ZIP (or an unzipped folder):
 
 ```sh
-python3 tools/import_audio.py /path/to/soooooo-fun-bible-tts-v1.zip
+python3 tools/import_audio.py /path/to/soooooo-fun-bible-tts-complete.zip
 ```
 
 It finds each `<book>/<chapter>/<verse>.m4a` wherever it sits in the archive and
@@ -49,6 +49,5 @@ missing recordings.
 node --test tests/audio-session.test.mjs tests/audio-dial.test.mjs
 ```
 
-Poetry, Prophecy and Gospels have full recording coverage (14,053 verses).
-Other sections are readable and show a "No recording for this verse" notice.
+Every verse of all 66 books has a recording (31,098 files, about 1.6 GB).
 Favorites and mute preferences are stored per device.

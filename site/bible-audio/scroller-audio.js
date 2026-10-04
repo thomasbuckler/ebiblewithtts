@@ -176,7 +176,7 @@ async function start() {
   // Verse/view changes cancel the wait. Taps on Favorites and tiny wheel
   // movements that do not navigate must not silently disarm an enabled timer.
   mountControls();
-  const response = await fetch(new URL('verses.json?v=m4a-audio-10', root));
+  const response = await fetch(new URL('verses.json?v=m4a-audio-11', root));
   if (!response.ok) throw new Error(`Audio catalog returned ${response.status}`);
   const tracks = await response.json();
   player = createVersePlayer({

@@ -10,7 +10,7 @@ for (const file of ['site/assets/index-BCmaOVrC.js', 'site/assets/routes-D_68uCl
   execFileSync(process.execPath, ['--check', file], { stdio: 'inherit' });
 }
 const tracks = Object.values(JSON.parse(readFileSync('site/bible-audio/verses.json', 'utf8')));
-if (tracks.length !== 14053) throw new Error('Incomplete audio catalog');
+if (tracks.length !== 31098) throw new Error('Incomplete audio catalog');
 const missing = tracks.filter(path => !existsSync(`site/${path}`));
 if (missing.length) {
   console.warn(`${missing.length} of ${tracks.length} recordings are missing from site/audio/ (first: ${missing[0]}).`);
