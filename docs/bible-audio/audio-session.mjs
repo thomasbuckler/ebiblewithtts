@@ -1,5 +1,8 @@
 // A user gesture unlocks this context once. New verses replace buffer sources,
 // never the context, so timer-driven playback keeps the same audio permission.
+// Some browsers play a recording in an <audio> element but cannot decode it
+// with Web Audio; after the first such failure the session plays every verse
+// through one built-in audio element instead.
 const safeDetail = value => String(value || '').replace(/https?:\/\/[^\s]+/gi, '[URL]').replace(/[\r\n\t]+/g, ' ').slice(0, 160);
 
 export function describeAudioFailure(failure) {
@@ -11,14 +14,23 @@ export function describeAudioFailure(failure) {
   if (failure.type) details.push(safeDetail(failure.type));
   if (failure.bytes !== undefined) details.push(`${failure.bytes} bytes`);
   if (failure.contextState) details.push(`context ${failure.contextState}`);
+  if (failure.element) details.push('built-in player');
   return `${labels[failure.stage] || 'Audio could not play'} (${details.filter(Boolean).join('; ')}). Tap the speaker to retry.`;
 }
 
 export class VerseAudioSession extends EventTarget {
-  constructor({ Context = globalThis.AudioContext || globalThis.webkitAudioContext, fetchAudio = globalThis.fetch.bind(globalThis) } = {}) {
+  constructor({
+    Context = globalThis.AudioContext || globalThis.webkitAudioContext,
+    fetchAudio = globalThis.fetch.bind(globalThis),
+    createElement = globalThis.Audio ? () => new globalThis.Audio() : null,
+  } = {}) {
     super();
     this.Context = Context;
     this.fetchAudio = fetchAudio;
+    this.createElement = createElement;
+    this.element = null;
+    this.elementSrc = '';
+    this.useElement = false;
     this.context = null;
     this.gain = null;
     this.source = null;
@@ -44,8 +56,12 @@ export class VerseAudioSession extends EventTarget {
     this._src = String(value);
   }
   get currentSrc() { return this._src; }
-  get duration() { return this.buffer?.duration ?? NaN; }
+  get duration() {
+    if (this.useElement) return this.elementSrc === this._src ? this.element.duration : NaN;
+    return this.buffer?.duration ?? NaN;
+  }
   get currentTime() {
+    if (this.useElement) return this.elementSrc === this._src ? this.element.currentTime : 0;
     return this.source && !this.paused
       ? Math.min(this.buffer.duration, this.offset + this.context.currentTime - this.startedAt)
       : this.offset;
@@ -54,6 +70,7 @@ export class VerseAudioSession extends EventTarget {
   set muted(value) {
     this._muted = Boolean(value);
     if (this.gain) this.gain.gain.value = this._muted ? 0 : 1;
+    if (this.element) this.element.muted = this._muted;
   }
   // Call directly within a real click handler, before awaiting any audio fetch.
   unlock() {
@@ -114,7 +131,10 @@ export class VerseAudioSession extends EventTarget {
       previous.stop();
       previous.disconnect();
     }
+    // Mark the pause first so the element's own pause event is not taken
+    // for an interruption.
     this.paused = true;
+    this.element?.pause();
   }
   load() {
     this.pause();
@@ -123,12 +143,18 @@ export class VerseAudioSession extends EventTarget {
     this.ended = false;
     this.error = null;
     this.failure = null;
+    if (this.elementSrc) {
+      // Stop downloading the previous verse.
+      this.elementSrc = '';
+      this.element.removeAttribute('src');
+      this.element.load();
+    }
   }
   removeAttribute(name) {
     if (name === 'src') { this.load(); this._src = ''; }
   }
   play() {
-    if (this.source && !this.paused) return Promise.resolve();
+    if (!this.paused && (this.source || this.useElement)) return Promise.resolve();
     if (this.pending) return this.pending;
     const version = this.version;
     const url = this._src;
@@ -145,6 +171,7 @@ export class VerseAudioSession extends EventTarget {
         throw new DOMException('Tap the speaker to enable audio', 'NotAllowedError');
       }
       if (!url) throw new Error('No verse recording selected');
+      if (this.useElement) return this.playElement(url, current, failure);
       if (!this.buffer) {
         failure.stage = 'download';
         const request = new AbortController();
@@ -158,7 +185,17 @@ export class VerseAudioSession extends EventTarget {
         failure.bytes = bytes.byteLength;
         if (!current()) throw aborted();
         failure.stage = 'decode';
-        const decoded = await this.context.decodeAudioData(bytes);
+        let decoded;
+        try {
+          decoded = await this.context.decodeAudioData(bytes);
+        } catch (error) {
+          if (!current()) throw aborted();
+          if (!this.createElement) throw error;
+          // This browser cannot decode the recording itself; let it play the file.
+          this.request = null;
+          this.useElement = true;
+          return this.playElement(url, current, failure);
+        }
         if (!current()) throw aborted();
         this.buffer = decoded; // Only the current verse is retained in memory.
         this.request = null;
@@ -205,5 +242,52 @@ export class VerseAudioSession extends EventTarget {
     });
     this.pending = task;
     return task;
+  }
+  async playElement(url, current, failure) {
+    failure.stage = 'start';
+    failure.element = true;
+    const element = this.element || this.makeElement();
+    if (this.elementSrc !== url) {
+      element.src = url;
+      this.elementSrc = url;
+    } else if (element.ended) {
+      element.currentTime = 0;
+    }
+    element.muted = this._muted;
+    await element.play();
+    if (!current()) throw new DOMException('Verse changed', 'AbortError');
+    this.paused = false;
+    this.ended = false;
+    this.error = null;
+    this.failure = null;
+  }
+  makeElement() {
+    const element = this.element = this.createElement();
+    element.preload = 'auto';
+    element.addEventListener('ended', () => {
+      if (this.paused || this.elementSrc !== this._src) return;
+      this.paused = true;
+      this.ended = true;
+      this.dispatchEvent(new Event('ended'));
+    });
+    element.addEventListener('pause', () => {
+      // A pause the session did not ask for (another app took the audio, a
+      // headset was unplugged) needs a tap to resume, like a suspended context.
+      if (this.paused || element.ended) return;
+      this.paused = true;
+      this.dispatchEvent(new Event('interrupted'));
+    });
+    element.addEventListener('error', () => {
+      if (this.paused || !element.error) return;
+      this.paused = true;
+      this.error = element.error;
+      this.failure = {
+        stage: 'start', element: true, name: 'MediaError',
+        message: safeDetail(element.error.message || `code ${element.error.code}`),
+        contextState: this.context?.state || 'unavailable',
+      };
+      this.dispatchEvent(new Event('error'));
+    });
+    return element;
   }
 }

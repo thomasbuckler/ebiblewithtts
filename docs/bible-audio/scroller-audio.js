@@ -1,7 +1,7 @@
 // Drop-in integration for the existing Holy Scroller at soooooo.fun.
 // Include once in the document shell, after hydration scripts, as type="module".
 import { createVersePlayer, verseKey } from './player.mjs?v=continuous-dial-6';
-import { VerseAudioSession, describeAudioFailure } from './audio-session.mjs?v=audio-diagnostics-8';
+import { VerseAudioSession, describeAudioFailure } from './audio-session.mjs?v=audio-fallback-9';
 import { createAudioDial } from './audio-dial.mjs?v=continuous-dial-6';
 
 const marker = Symbol.for('holy-scroller.audio.v1');

@@ -4,7 +4,34 @@ import { VerseAudioSession, describeAudioFailure } from '../site/bible-audio/aud
 import { createVersePlayer } from '../site/bible-audio/player.mjs';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
-function fixture({ fetchAudio, decodeAudioData, startSource, resumeContext } = {}) {
+// A stand-in for the browser's built-in <audio> element. Like a real one, it
+// reports pauses as a queued event.
+class FakeElement extends EventTarget {
+  constructor(playElement) {
+    super();
+    Object.assign(this, { playElement, paused: true, ended: false, muted: false, currentTime: 0, duration: NaN, error: null, plays: 0, loads: 0, _src: '' });
+  }
+  get src() { return this._src; }
+  set src(value) { this._src = value; this.ended = false; this.currentTime = 0; this.duration = NaN; }
+  removeAttribute(name) { if (name === 'src') this._src = ''; }
+  load() { this.loads++; this.paused = true; }
+  play() {
+    this.plays++;
+    const result = this.playElement?.(this);
+    if (result) return result;
+    this.paused = false; this.duration = 10;
+    return Promise.resolve();
+  }
+  pause() {
+    if (this.paused) return;
+    this.paused = true;
+    queueMicrotask(() => this.dispatchEvent(new Event('pause')));
+  }
+  finish() { this.currentTime = this.duration; this.ended = true; this.paused = true; this.dispatchEvent(new Event('pause')); this.dispatchEvent(new Event('ended')); }
+  interrupt() { this.paused = true; this.dispatchEvent(new Event('pause')); }
+}
+
+function fixture({ fetchAudio, decodeAudioData, startSource, resumeContext, playElement, builtInPlayer = false } = {}) {
   let gesture = false;
   const contexts = [], sources = [], phases = [], advances = [];
   class Context extends EventTarget {
@@ -27,7 +54,12 @@ function fixture({ fetchAudio, decodeAudioData, startSource, resumeContext } = {
       return source;
     }
   }
-  const audio = new VerseAudioSession({ Context, fetchAudio: fetchAudio || (async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) })) });
+  const fetches = [], elements = [];
+  const audio = new VerseAudioSession({
+    Context,
+    fetchAudio: (url, options) => { fetches.push(url); return (fetchAudio || (async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) })))(url, options); },
+    createElement: builtInPlayer ? () => { const element = new FakeElement(playElement); elements.push(element); return element; } : null,
+  });
   let clock = 0, id = 0;
   const timers = new Map();
   const order = ['job:1:1', 'job:1:2', 'job:1:3', 'job:1:4'];
@@ -39,7 +71,7 @@ function fixture({ fetchAudio, decodeAudioData, startSource, resumeContext } = {
     setTimer: (fn, delay) => { timers.set(++id, { fn, at: clock + delay }); return id; },
     clearTimer: id => timers.delete(id),
   });
-  return { audio, player, contexts, sources, phases, advances,
+  return { audio, player, contexts, sources, phases, advances, fetches, elements,
     async tap() { gesture = true; const result = audio.unlock(); gesture = false; await result; player.retry(); },
     tick(ms) { clock += ms; for (const [id, task] of timers) if (task.at <= clock) { timers.delete(id); task.fn(); } },
   };
@@ -181,4 +213,87 @@ test('pause/resume keeps the offset and the same unlocked context', async () => 
   assert.equal(f.sources[1].offset, 3);
   assert.equal(f.contexts.length, 1);
   assert.equal(f.contexts[0].resumes, 1);
+});
+
+const cannotDecode = () => Promise.reject(new DOMException('Unable to decode audio data', 'EncodingError'));
+
+test('a recording Web Audio cannot decode plays through the built-in player', async () => {
+  const f = fixture({ decodeAudioData: cannotDecode, builtInPlayer: true });
+  await f.tap(); f.player.setVerse('job:1:1'); await flush();
+  assert.equal(f.player.snapshot().phase, 'playing');
+  assert.equal(f.audio.useElement, true);
+  assert.equal(f.elements.length, 1);
+  assert.equal(f.elements[0].src, 'https://example.org/audio/job/1/1.m4a');
+  assert.equal(f.audio.failure, null);
+  // Later verses go straight to the built-in player without a decode attempt.
+  f.player.setActive(false); f.player.setVerse('job:1:2'); f.player.setActive(true); await flush();
+  assert.equal(f.player.snapshot().phase, 'playing');
+  assert.equal(f.elements[0].src, 'https://example.org/audio/job/1/2.m4a');
+  assert.equal(f.fetches.length, 1);
+  assert.equal(f.elements.length, 1);
+  assert.equal(f.phases.includes('blocked'), false);
+});
+
+test('built-in player completion still auto-advances after two seconds', async () => {
+  const f = fixture({ decodeAudioData: cannotDecode, builtInPlayer: true });
+  await f.tap(); f.player.setAuto(true); f.player.setVerse('job:1:1'); await flush();
+  for (let verse = 0; verse < 2; verse++) {
+    f.elements[0].finish(); await flush();
+    assert.equal(f.player.snapshot().phase, 'waiting');
+    f.tick(1999); assert.equal(f.advances.length, verse);
+    f.tick(1); await flush();
+    assert.equal(f.advances.length, verse + 1);
+    assert.equal(f.player.snapshot().phase, 'playing');
+    assert.equal(f.elements[0].src, `https://example.org/audio/job/1/${verse + 2}.m4a`);
+  }
+  assert.equal(f.phases.includes('blocked'), false);
+});
+
+test('mute, pause and resume work on the built-in player', async () => {
+  const f = fixture({ decodeAudioData: cannotDecode, builtInPlayer: true });
+  await f.tap(); f.player.setVerse('job:1:1'); await flush();
+  const element = f.elements[0];
+  f.player.setMuted(true); assert.equal(element.muted, true);
+  f.player.setMuted(false); assert.equal(element.muted, false);
+  element.currentTime = 4;
+  f.player.setActive(false); await flush();
+  assert.equal(element.paused, true);
+  assert.equal(f.player.snapshot().phase, 'paused');
+  f.player.setActive(true); await flush();
+  // Resuming keeps the position instead of reloading the verse.
+  assert.equal(element.currentTime, 4);
+  assert.equal(element.src, 'https://example.org/audio/job/1/1.m4a');
+  assert.equal(f.player.snapshot().phase, 'playing');
+  assert.equal(f.phases.includes('blocked'), false);
+});
+
+test('an outside pause of the built-in player asks for a tap, and the tap resumes', async () => {
+  const f = fixture({ decodeAudioData: cannotDecode, builtInPlayer: true });
+  await f.tap(); f.player.setVerse('job:1:1'); await flush();
+  f.elements[0].interrupt(); await flush();
+  assert.equal(f.player.snapshot().phase, 'blocked');
+  await f.tap(); await flush();
+  assert.equal(f.player.snapshot().phase, 'playing');
+  assert.equal(f.elements[0].plays, 2);
+});
+
+test('a built-in player failure is reported with its own label', async () => {
+  const f = fixture({ decodeAudioData: cannotDecode, builtInPlayer: true,
+    playElement: () => Promise.reject(new DOMException('The element has no supported sources.', 'NotSupportedError')) });
+  await f.tap(); f.player.setVerse('job:1:1'); await flush();
+  assert.equal(f.player.snapshot().phase, 'error');
+  assert.equal(f.audio.failure.stage, 'start');
+  assert.equal(f.audio.failure.element, true);
+  assert.match(describeAudioFailure(f.audio.failure), /Audio playback failed \(NotSupportedError.*built-in player\)/);
+});
+
+test('a blocked built-in player recovers with one tap', async () => {
+  let blocked = true;
+  const f = fixture({ decodeAudioData: cannotDecode, builtInPlayer: true,
+    playElement: () => blocked ? Promise.reject(new DOMException('play() needs a user gesture', 'NotAllowedError')) : null });
+  await f.tap(); f.player.setVerse('job:1:1'); await flush();
+  assert.equal(f.player.snapshot().phase, 'blocked');
+  blocked = false;
+  await f.tap(); await flush();
+  assert.equal(f.player.snapshot().phase, 'playing');
 });
