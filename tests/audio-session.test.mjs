@@ -29,6 +29,8 @@ class FakeElement extends EventTarget {
   }
   finish() { this.currentTime = this.duration; this.ended = true; this.paused = true; this.dispatchEvent(new Event('pause')); this.dispatchEvent(new Event('ended')); }
   interrupt() { this.paused = true; this.dispatchEvent(new Event('pause')); }
+  resume() { this.paused = false; this.dispatchEvent(new Event('playing')); }
+  fail(message) { this.error = { code: 3, message }; this.dispatchEvent(new Event('error')); }
 }
 
 function fixture({ fetchAudio, decodeAudioData, startSource, resumeContext, playElement, builtInPlayer = false } = {}) {
@@ -284,7 +286,8 @@ test('a built-in player failure is reported with its own label', async () => {
   assert.equal(f.player.snapshot().phase, 'error');
   assert.equal(f.audio.failure.stage, 'start');
   assert.equal(f.audio.failure.element, true);
-  assert.match(describeAudioFailure(f.audio.failure), /Audio playback failed \(NotSupportedError.*built-in player\)/);
+  assert.match(describeAudioFailure(f.audio.failure), /Audio playback failed \(NotSupportedError.*built-in player after Web Audio EncodingError on decode\)/);
+  assert.doesNotMatch(describeAudioFailure(f.audio.failure), /HTTP|bytes/);
 });
 
 test('a blocked built-in player recovers with one tap', async () => {
@@ -296,4 +299,79 @@ test('a blocked built-in player recovers with one tap', async () => {
   blocked = false;
   await f.tap(); await flush();
   assert.equal(f.player.snapshot().phase, 'playing');
+});
+
+test('a blocked or failed download plays through the built-in player', async () => {
+  for (const fetchAudio of [
+    async () => { throw new TypeError('Failed to fetch'); },
+    async () => ({ ok: true, status: 200, headers: new Headers(), arrayBuffer: async () => { throw new TypeError('network error'); } }),
+  ]) {
+    const f = fixture({ fetchAudio, builtInPlayer: true });
+    await f.tap(); f.player.setVerse('job:1:1'); await flush();
+    assert.equal(f.player.snapshot().phase, 'playing');
+    assert.equal(f.audio.useElement, true);
+    assert.equal(f.elements[0].src, 'https://example.org/audio/job/1/1.m4a');
+    f.player.destroy();
+  }
+});
+
+test('an HTTP error is reported instead of switching players', async () => {
+  const f = fixture({ builtInPlayer: true, fetchAudio: async () => ({ ok: false, status: 429, headers: new Headers(), arrayBuffer: async () => new ArrayBuffer(0) }) });
+  await f.tap(); f.player.setVerse('job:1:1'); await flush();
+  assert.equal(f.player.snapshot().phase, 'error');
+  assert.equal(f.audio.useElement, false);
+  assert.equal(f.audio.failure.status, 429);
+  assert.equal(f.elements.length, 0);
+});
+
+test('a media error before the built-in player starts is reported, and retry reloads', async () => {
+  let failNext = true;
+  const f = fixture({ decodeAudioData: cannotDecode, builtInPlayer: true,
+    playElement: element => failNext ? (queueMicrotask(() => element.fail('PIPELINE_ERROR_DECODE')), new Promise(() => {})) : null });
+  await f.tap(); f.player.setVerse('job:1:1'); await flush(); await flush();
+  assert.equal(f.player.snapshot().phase, 'error');
+  assert.match(describeAudioFailure(f.audio.failure), /Audio playback failed \(MediaError; PIPELINE_ERROR_DECODE.*built-in player/);
+  failNext = false;
+  f.elements[0].error = null;
+  await f.tap(); await flush();
+  assert.equal(f.player.snapshot().phase, 'playing');
+});
+
+test('an outside pause before the built-in player starts asks for a tap', async () => {
+  let abort = true;
+  const f = fixture({ decodeAudioData: cannotDecode, builtInPlayer: true,
+    playElement: () => abort ? Promise.reject(new DOMException('The play() request was interrupted by a call to pause().', 'AbortError')) : null });
+  await f.tap(); f.player.setVerse('job:1:1'); await flush();
+  assert.equal(f.player.snapshot().phase, 'blocked');
+  abort = false;
+  await f.tap(); await flush();
+  assert.equal(f.player.snapshot().phase, 'playing');
+});
+
+test('a resume from outside the page clears the tap prompt and keeps auto-advance', async () => {
+  const f = fixture({ decodeAudioData: cannotDecode, builtInPlayer: true });
+  await f.tap(); f.player.setAuto(true); f.player.setVerse('job:1:1'); await flush();
+  f.elements[0].interrupt(); await flush();
+  assert.equal(f.player.snapshot().phase, 'blocked');
+  f.elements[0].resume(); await flush();
+  assert.equal(f.player.snapshot().phase, 'playing');
+  f.elements[0].finish(); await flush();
+  f.tick(2000); await flush();
+  assert.deepEqual(f.advances, ['job:1:1']);
+  assert.equal(f.player.snapshot().phase, 'playing');
+});
+
+test('after Web Audio has played, a bad recording is reported instead of switching players', async () => {
+  let decodes = 0;
+  const f = fixture({ builtInPlayer: true, decodeAudioData: () => ++decodes === 2 ? cannotDecode() : Promise.resolve({ duration: 10 }) });
+  await f.tap(); f.player.setVerse('job:1:1'); await flush();
+  assert.equal(f.player.snapshot().phase, 'playing');
+  f.player.setActive(false); f.player.setVerse('job:1:2'); f.player.setActive(true); await flush();
+  assert.equal(f.player.snapshot().phase, 'error');
+  assert.equal(f.audio.failure.stage, 'decode');
+  assert.equal(f.audio.useElement, false);
+  assert.equal(f.elements.length, 0);
+  f.player.setActive(false); f.player.setVerse('job:1:3'); f.player.setActive(true); await flush();
+  assert.equal(f.player.snapshot().phase, 'playing');
+  assert.equal(f.sources.length, 2);
 });

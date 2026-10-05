@@ -1,8 +1,9 @@
 // A user gesture unlocks this context once. New verses replace buffer sources,
 // never the context, so timer-driven playback keeps the same audio permission.
-// Some browsers play a recording in an <audio> element but cannot decode it
-// with Web Audio; after the first such failure the session plays every verse
-// through one built-in audio element instead.
+// Some browsers play a recording in an <audio> element but cannot download it
+// for Web Audio or decode it there. If that happens before Web Audio has
+// played anything, the session plays every verse through one built-in audio
+// element instead.
 const safeDetail = value => String(value || '').replace(/https?:\/\/[^\s]+/gi, '[URL]').replace(/[\r\n\t]+/g, ' ').slice(0, 160);
 
 export function describeAudioFailure(failure) {
@@ -14,7 +15,7 @@ export function describeAudioFailure(failure) {
   if (failure.type) details.push(safeDetail(failure.type));
   if (failure.bytes !== undefined) details.push(`${failure.bytes} bytes`);
   if (failure.contextState) details.push(`context ${failure.contextState}`);
-  if (failure.element) details.push('built-in player');
+  if (failure.element) details.push(`built-in player${failure.reason ? ` after Web Audio ${safeDetail(failure.reason)}` : ''}`);
   return `${labels[failure.stage] || 'Audio could not play'} (${details.filter(Boolean).join('; ')}). Tap the speaker to retry.`;
 }
 
@@ -31,6 +32,8 @@ export class VerseAudioSession extends EventTarget {
     this.element = null;
     this.elementSrc = '';
     this.useElement = false;
+    this.fallbackReason = '';
+    this.decodedOnce = false;
     this.context = null;
     this.gain = null;
     this.source = null;
@@ -173,30 +176,37 @@ export class VerseAudioSession extends EventTarget {
       if (!url) throw new Error('No verse recording selected');
       if (this.useElement) return this.playElement(url, current, failure);
       if (!this.buffer) {
-        failure.stage = 'download';
-        const request = new AbortController();
-        this.request = request;
-        const response = await this.fetchAudio(url, { signal: request.signal });
-        failure.status = response.status;
-        failure.type = safeDetail(response.headers?.get('content-type'));
-        if (!response.ok) throw new Error('The server did not return the verse recording');
-        failure.stage = 'read';
-        const bytes = await response.arrayBuffer();
-        failure.bytes = bytes.byteLength;
-        if (!current()) throw aborted();
-        failure.stage = 'decode';
         let decoded;
         try {
+          failure.stage = 'download';
+          const request = new AbortController();
+          this.request = request;
+          const response = await this.fetchAudio(url, { signal: request.signal });
+          failure.status = response.status;
+          failure.type = safeDetail(response.headers?.get('content-type'));
+          if (!response.ok) throw new Error('The server did not return the verse recording');
+          failure.stage = 'read';
+          const bytes = await response.arrayBuffer();
+          failure.bytes = bytes.byteLength;
+          if (!current()) throw aborted();
+          failure.stage = 'decode';
           decoded = await this.context.decodeAudioData(bytes);
         } catch (error) {
           if (!current()) throw aborted();
-          if (!this.createElement) throw error;
-          // This browser cannot decode the recording itself; let it play the file.
+          // The built-in player needs neither CORS nor Web Audio decoding, so
+          // it can play a recording this browser could not download (TypeError:
+          // blocked or failed request) or decode itself. Once Web Audio has
+          // played a recording, a failure means a bad file or network, which
+          // is reported as before.
+          const elementMayWork = failure.stage === 'decode' || error?.name === 'TypeError';
+          if (!this.createElement || this.decodedOnce || error?.name === 'AbortError' || !elementMayWork) throw error;
           this.request = null;
           this.useElement = true;
+          this.fallbackReason = `${error?.name || 'Error'} on ${failure.stage}`;
           return this.playElement(url, current, failure);
         }
         if (!current()) throw aborted();
+        this.decodedOnce = true;
         this.buffer = decoded; // Only the current verse is retained in memory.
         this.request = null;
       }
@@ -244,17 +254,38 @@ export class VerseAudioSession extends EventTarget {
     return task;
   }
   async playElement(url, current, failure) {
+    // The element downloads the file itself; Web Audio's download details do not apply.
+    delete failure.status;
+    delete failure.type;
+    delete failure.bytes;
     failure.stage = 'start';
     failure.element = true;
+    failure.reason = this.fallbackReason;
     const element = this.element || this.makeElement();
-    if (this.elementSrc !== url) {
+    if (this.elementSrc !== url || element.error) {
       element.src = url;
       this.elementSrc = url;
     } else if (element.ended) {
       element.currentTime = 0;
     }
     element.muted = this._muted;
-    await element.play();
+    // A media error after the file's header has loaded does not reject a
+    // pending play(), so listen for it too.
+    const playing = element.play();
+    playing.catch(() => {});
+    let onError;
+    try {
+      await Promise.race([playing, new Promise((_, reject) => {
+        onError = () => reject(new DOMException(safeDetail(element.error?.message || `code ${element.error?.code}`), 'MediaError'));
+        element.addEventListener('error', onError);
+      })]);
+    } catch (error) {
+      // Something outside the page paused the element before it started.
+      if (error?.name === 'AbortError' && current()) throw new DOMException('Playback was paused', 'NotAllowedError');
+      throw error;
+    } finally {
+      element.removeEventListener('error', onError);
+    }
     if (!current()) throw new DOMException('Verse changed', 'AbortError');
     this.paused = false;
     this.ended = false;
@@ -269,6 +300,14 @@ export class VerseAudioSession extends EventTarget {
       this.paused = true;
       this.ended = true;
       this.dispatchEvent(new Event('ended'));
+    });
+    element.addEventListener('playing', () => {
+      // A resume the session did not ask for (media notification, headset
+      // button, the system after a short audio-focus loss).
+      if (!this.paused || this.pending || this.elementSrc !== this._src) return;
+      this.paused = false;
+      this.ended = false;
+      this.dispatchEvent(new Event('resumed'));
     });
     element.addEventListener('pause', () => {
       // A pause the session did not ask for (another app took the audio, a

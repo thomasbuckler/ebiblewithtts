@@ -1,4 +1,4 @@
-import { AUTO_ADVANCE_DELAY_MS } from './player.mjs?v=continuous-dial-6';
+import { AUTO_ADVANCE_DELAY_MS } from './player.mjs?v=continuous-dial-7';
 
 // One revolution spans the reading and its scheduled pause. Keep the angle
 // unwrapped at automatic transitions so crossing twelve never stops the hand.

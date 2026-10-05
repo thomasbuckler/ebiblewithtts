@@ -31,6 +31,14 @@ export function createVersePlayer({
     publish();
   };
   audio.addEventListener('interrupted', interrupted);
+  // The built-in player can be resumed from outside the page (media
+  // notification, headset button).
+  const resumed = () => {
+    if (!active || !key || finished) return;
+    phase = 'playing';
+    publish();
+  };
+  audio.addEventListener('resumed', resumed);
   function cancelAdvance() {
     if (timer !== null) clearTimer(timer);
     timer = null;
@@ -147,6 +155,7 @@ export function createVersePlayer({
     cancelAdvance();
     removeListeners();
     audio.removeEventListener('interrupted', interrupted);
+    audio.removeEventListener('resumed', resumed);
     audio.pause();
     audio.removeAttribute('src');
     audio.load();
