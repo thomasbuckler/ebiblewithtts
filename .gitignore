@@ -2,3 +2,4 @@ dist/
 .sites-runtime/
 node_modules/
 *.tar.gz
+pages/
