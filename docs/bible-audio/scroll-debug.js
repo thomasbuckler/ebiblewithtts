@@ -1,36 +1,48 @@
-// Diagnostic overlay for unexpected scrolling, shown only when the address
-// ends in #scrolldebug. It lists which element scrolled, the window and
-// visual-viewport positions, and focus changes, newest first.
+// Diagnostic panel for unexpected scrolling, shown only when the address
+// ends in #scrolldebug. Newest events first; nothing is cleared.
 function startScrollDebug() {
   const panel = document.createElement('pre');
-  panel.style.cssText = 'position:fixed;z-index:99;left:4px;right:4px;bottom:4px;max-height:42vh;overflow:auto;margin:0;padding:6px;font:11px/1.35 monospace;background:rgba(255,255,230,.96);color:#000;border:1px solid #999;border-radius:6px;pointer-events:none;white-space:pre-wrap';
+  panel.style.cssText = 'position:fixed;z-index:99;left:2px;right:2px;bottom:2px;max-height:55vh;overflow:hidden;margin:0;padding:4px;font:10px/1.3 monospace;background:rgba(255,255,230,.97);color:#000;border:1px solid #999;border-radius:4px;pointer-events:none;white-space:pre-wrap';
+  const marker = document.createElement('div');
+  marker.textContent = 'TOP OF PAGE';
+  marker.style.cssText = 'position:fixed;z-index:99;top:0;left:50%;transform:translateX(-50%);font:bold 10px monospace;background:#f0f;color:#fff;padding:1px 6px;pointer-events:none';
   const lines = [];
-  let t0 = performance.now();
+  const t0 = performance.now();
   const vv = window.visualViewport;
   const name = el => !el || el === document ? 'document' : el === window ? 'window'
-    : `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}.${String(el.className).split(' ').slice(0, 3).join('.')}`;
-  const state = () => `win ${Math.round(scrollY)} | vv top ${vv ? vv.offsetTop.toFixed(0) : '-'} page ${vv ? vv.pageTop.toFixed(0) : '-'} h ${vv ? vv.height.toFixed(0) : '-'} scale ${vv ? vv.scale.toFixed(2) : '-'} | innerH ${innerHeight}`;
+    : el.nodeType !== 1 ? el.nodeName
+    : `${el.tagName.toLowerCase()}.${String(el.className.baseVal ?? el.className).split(' ').filter(Boolean).slice(0, 2).join('.')}`;
+  const r = n => Math.round(n);
+  function state() {
+    const view = [...document.querySelectorAll('div.fixed.inset-0')].find(d => !d.classList.contains('hidden') && d.getClientRects().length) || null;
+    const list = view?.querySelector('.overflow-y-auto');
+    const header = view?.querySelector('header');
+    const input = view?.querySelector('input');
+    const top = document.elementFromPoint(innerWidth / 2, 3);
+    return [
+      `win ${r(scrollY)} body ${r(document.body.scrollTop)} | vv top ${vv ? r(vv.offsetTop) : '-'} pageTop ${vv ? r(vv.pageTop) : '-'} h ${vv ? r(vv.height) : '-'} | innerH ${innerHeight} screenH ${screen.height}`,
+      `view top ${view ? r(view.getBoundingClientRect().top) : '-'} h ${view ? r(view.getBoundingClientRect().height) : '-'} | list scroll ${list ? r(list.scrollTop) : '-'} | header top ${header ? r(header.getBoundingClientRect().top) : '-'} | input top ${input ? r(input.getBoundingClientRect().top) : '-'}`,
+      `at top of screen: ${name(top)} "${(top?.textContent || '').trim().slice(0, 20)}" | focused: ${name(document.activeElement)}`,
+    ].join('\n');
+  }
+  function render() { panel.textContent = `SCROLL DEBUG v4\n${state()}\n---\n${lines.join('\n')}`; }
   const log = text => {
-    lines.unshift(`${((performance.now() - t0) / 1000).toFixed(2)}s ${text}`);
-    lines.length = Math.min(lines.length, 40);
-    panel.textContent = `SCROLL DEBUG (screenshot this)\n${state()}\n` + lines.join('\n');
+    lines.unshift(`${((performance.now() - t0) / 1000).toFixed(2)} ${text}`);
+    lines.length = Math.min(lines.length, 30);
+    render();
   };
-  document.addEventListener('scroll', e => log(`scroll ${name(e.target)} -> ${Math.round(e.target.scrollTop ?? scrollY)}`), true);
-  window.addEventListener('scroll', () => log(`scroll window -> ${Math.round(scrollY)}`));
-  vv?.addEventListener('resize', () => log(`viewport resize h ${vv.height.toFixed(0)} top ${vv.offsetTop.toFixed(0)}`));
-  vv?.addEventListener('scroll', () => log(`viewport pan top ${vv.offsetTop.toFixed(0)} pageTop ${vv.pageTop.toFixed(0)}`));
-  window.addEventListener('resize', () => log(`window resize innerH ${innerHeight}`));
-  document.addEventListener('focusin', e => { t0 = performance.now(); lines.length = 0; log(`focus ${name(e.target)}`); });
-  document.addEventListener('pointerdown', e => log(`tap ${name(e.target)}`), true);
-  const header = () => [...document.querySelectorAll('header')].find(h => h.offsetParent);
+  document.addEventListener('scroll', e => log(`scroll ${name(e.target)} -> ${r(e.target.scrollTop ?? scrollY)}`), true);
+  vv?.addEventListener('resize', () => log(`vv resize h ${r(vv.height)} top ${r(vv.offsetTop)}`));
+  vv?.addEventListener('scroll', () => log(`vv pan top ${r(vv.offsetTop)} pageTop ${r(vv.pageTop)}`));
+  window.addEventListener('resize', () => log(`win resize innerH ${innerHeight}`));
+  for (const type of ['touchstart', 'touchend', 'focusin', 'focusout']) {
+    document.addEventListener(type, e => log(`${type} ${name(e.target)}`), true);
+  }
   setInterval(() => {
-    const h = header();
-    const top = h ? Math.round(h.getBoundingClientRect().top) : '-';
-    panel.dataset.headerTop = top;
-    panel.textContent = panel.textContent.replace(/^SCROLL DEBUG.*\n.*\n/, `SCROLL DEBUG (screenshot this) header top ${top}\n${state()}\n`);
+    if (document.body && !panel.isConnected) document.body.append(panel);
+    if (document.body && !marker.isConnected) document.body.append(marker);
+    render();
   }, 250);
-  // The app takes over the page after it loads; keep the panel attached.
-  setInterval(() => { if (document.body && !panel.isConnected) document.body.append(panel); }, 300);
   log('ready');
 }
 if (location.hash.includes('scrolldebug')) startScrollDebug();
