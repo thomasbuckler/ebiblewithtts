@@ -38,7 +38,7 @@ const prefixed = (quote, counts) => ['/assets/', '/data/', '/bible-audio/', '/fa
   .filter(([, , count]) => count);
 
 rewrite('docs/index.html', [
-  ...prefixed('"', [7, 0, 1, 1]),
+  ...prefixed('"', [7, 0, 2, 1]),
   ['<meta name="description"', `<meta name="bible-audio-base" content="${audioURL.href}"/><meta name="description"`, 1],
 ]);
 rewrite('docs/assets/index-BCmaOVrC.js', [
