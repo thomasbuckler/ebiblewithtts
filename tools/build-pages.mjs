@@ -7,7 +7,8 @@
 //     must allow cross-origin fetches (CORS), because the player uses fetch();
 //   - prefixes the app's absolute paths (/assets, /data, /bible-audio,
 //     /favicon.svg) and the router's base path with /<repo>;
-//   - starts with no sections ticked, so visitors pick what to read.
+//   - starts with no sections ticked, so visitors pick what to read;
+//   - adds b.html, which opens straight to the Bible's table of contents.
 //
 // Usage: node tools/build-pages.mjs [AUDIO_URL] [repo]
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -58,6 +59,16 @@ for (const [key, path] of Object.entries(catalog)) {
   catalog[key] = path.slice('audio/'.length);
 }
 writeFileSync('docs/bible-audio/verses.json', JSON.stringify(catalog));
+
+// b.html opens straight to the Bible's table of contents (the book list). The
+// router only knows the site root, so the page switches its address to the root
+// before the app starts, and the app opens the book list when it sees hs-toc.
+const page = readFileSync('docs/index.html', 'latin1');
+const toc = page
+  .replace('<html lang="en" class="antialiased">', '<html lang="en" class="antialiased hs-toc">')
+  .replace('<head>', `<head><script>history.replaceState(null,'',location.pathname.replace(/b\\.html$/,'')+location.search)</script>`);
+if (toc === page || toc.split('hs-toc').length !== 2 || !toc.includes('b\\.html$')) throw new Error('Could not build b.html');
+writeFileSync('docs/b.html', toc, 'latin1');
 
 if (existsSync('docs/audio')) throw new Error('docs/ must not include the audio');
 console.log(`GitHub Pages copy ready in docs/ (served at ${base}/, audio from ${audioURL.href}).`);
